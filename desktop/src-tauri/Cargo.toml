@@ -1,0 +1,40 @@
+[package]
+name = "nogowallet"
+version = "1.0.0"
+description = "NogoChain Cross-Platform Wallet"
+authors = ["NogoChain Foundation"]
+license = "MIT"
+repository = "https://github.com/nogochain/nogochain"
+edition = "2021"
+
+# [build]
+# target = "x86_64-pc-windows-msvc"
+# out-dir = "target"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = [ "api-all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+dirs = "5.0"
+thiserror = "1.0"
+base64 = "0.21"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

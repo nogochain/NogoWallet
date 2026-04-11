@@ -1,0 +1,27 @@
+{
+  "name": "NogoChain Wallet",
+  "short_name": "NogoWallet",
+  "description": "NogoChain 官方跨平台钱包 - 安全、去中心化的数字资产管理",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "lang": "zh-CN",
+  "dir": "ltr"
+}

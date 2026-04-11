@@ -1,0 +1,387 @@
+/**
+ * NogoChain SDK Integration Service
+ * Reuses existing JavaScript SDK with enhancements for wallet operations
+ */
+
+import axios from 'axios';
+
+class NogoChainRPC {
+  constructor(baseURL = 'http://localhost:8080') {
+    this.baseURL = baseURL;
+    this.client = axios.create({
+      baseURL,
+      timeout: 30000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Get chain information
+   */
+  async getChainInfo() {
+    const { data } = await this.client.get('/chain/info');
+    return data;
+  }
+
+  /**
+   * Get balance and nonce for an address
+   */
+  async getBalance(address) {
+    const { data } = await this.client.get(`/balance/${address}`);
+    return {
+      balance: data.balance || 0,
+      nonce: data.nonce || 0
+    };
+  }
+
+  /**
+   * Get block by height or hash
+   */
+  async getBlock(heightOrHash) {
+    const endpoint = typeof heightOrHash === 'number' 
+      ? `/block/height/${heightOrHash}` 
+      : `/block/hash/${heightOrHash}`;
+    const { data } = await this.client.get(endpoint);
+    return data;
+  }
+
+  /**
+   * Get transaction by ID
+   */
+  async getTransaction(txId) {
+    const { data } = await this.client.get(`/tx/${txId}`);
+    return data;
+  }
+
+  /**
+   * Get mempool transactions
+   */
+  async getMempool() {
+    const { data } = await this.client.get('/mempool');
+    return data;
+  }
+
+  /**
+   * Get address transactions with pagination
+   */
+  async getAddressTransactions(address, limit = 50, offset = 0) {
+    const { data } = await this.client.get(`/address/${address}/txs?limit=${limit}&offset=${offset}`);
+    return {
+      txs: data.txs || [],
+      total: data.total || 0
+    };
+  }
+
+  /**
+   * Estimate transaction fee
+   */
+  async estimateFee(speed = 'average', size = 350) {
+    try {
+      const { data } = await this.client.get(`/tx/estimate_fee?speed=${speed}&size=${size}`);
+      return data.estimatedFee || 45000;
+    } catch (e) {
+      console.warn('Fee estimation failed, using default:', e);
+      return 45000; // Fallback to safe default
+    }
+  }
+
+  /**
+   * Send transaction to network
+   */
+  async sendTransaction(tx) {
+    const { data } = await this.client.post('/tx', tx);
+    return {
+      accepted: data.accepted || data.Accepted || false,
+      txId: data.txId || data.TxID || data.txid,
+      message: data.message || data.Message || data.error
+    };
+  }
+
+  /**
+   * Get transaction proof
+   */
+  async getTxProof(txId) {
+    const { data } = await this.client.get(`/tx/proof/${txId}`);
+    return data;
+  }
+
+  /**
+   * Subscribe to mempool events via WebSocket
+   */
+  subscribeToMempool(callback) {
+    const wsUrl = this.baseURL.replace('http', 'ws') + '/ws';
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'mempool') {
+        callback(msg.data);
+      }
+    };
+    
+    return ws;
+  }
+
+  /**
+   * Subscribe to block events via WebSocket
+   */
+  subscribeToBlocks(callback) {
+    const wsUrl = this.baseURL.replace('http', 'ws') + '/ws';
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'block') {
+        callback(msg.data);
+      }
+    };
+    
+    return ws;
+  }
+}
+
+/**
+ * Transaction Builder Service
+ */
+export class TransactionBuilder {
+  constructor(rpcClient) {
+    this.rpc = rpcClient || new NogoChainRPC();
+  }
+
+  /**
+   * Compute from address from public key
+   */
+  async computeFromAddress(publicKeyBytes) {
+    const { sha256 } = await import('@noble/hashes/sha256');
+    
+    const pubKeyHash = sha256(publicKeyBytes);
+    
+    const addressData = new Uint8Array(1 + 32);
+    addressData[0] = 0x00; // version
+    addressData.set(pubKeyHash, 1);
+    
+    const checksumHash = sha256(addressData);
+    const checksumBytes = checksumHash.slice(0, 4);
+    
+    const fullAddress = new Uint8Array(1 + 32 + 4);
+    fullAddress.set(addressData, 0);
+    fullAddress.set(checksumBytes, 1 + 32);
+    
+    return 'NOGO' + Array.from(fullAddress).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /**
+   * Build transfer transaction
+   */
+  async buildTransfer(fromPubKey, toAddress, amount, fee, nonce, data = '') {
+    const fromAddr = await this.computeFromAddress(fromPubKey);
+    
+    return {
+      type: 'transfer',
+      chainId: 1,
+      fromPubKey: arrayBufferToBase64(fromPubKey.buffer),
+      toAddress,
+      amount,
+      fee,
+      nonce,
+      data
+    };
+  }
+
+  /**
+   * Create signing hash (Legacy JSON format)
+   * Matches Go's txSigningHashLegacyJSON
+   */
+  async createSigningHash(tx) {
+    const { sha256 } = await import('@noble/hashes/sha256');
+    
+    const legacyJsonObj = {
+      type: tx.type,
+      chainId: tx.chainId,
+      fromAddr: tx.fromAddr,
+      toAddress: tx.toAddress,
+      amount: tx.amount,
+      fee: tx.fee,
+      nonce: tx.nonce
+    };
+    
+    if (tx.data && tx.data.length > 0) {
+      legacyJsonObj.data = tx.data;
+    }
+    
+    const legacyJsonStr = JSON.stringify(legacyJsonObj);
+    const encoder = new TextEncoder();
+    const preimage = encoder.encode(legacyJsonStr);
+    const hash = sha256(preimage);
+    
+    return hash;
+  }
+
+  /**
+   * Sign transaction with Ed25519
+   */
+  async signTransaction(tx, privateKey) {
+    const { ed25519 } = await import('@noble/ed25519');
+    
+    // Compute from address
+    const pubKeyBytes = base64ToUint8Array(tx.fromPubKey);
+    tx.fromAddr = await this.computeFromAddress(pubKeyBytes);
+    
+    // Create signing hash
+    const msgHash = await this.createSigningHash(tx);
+    
+    // Sign
+    const signature = await ed25519.sign(msgHash, privateKey);
+    
+    // Add signature to transaction
+    tx.signature = arrayBufferToBase64(signature.buffer);
+    
+    return tx;
+  }
+
+  /**
+   * Build, sign and send transaction
+   */
+  async createAndSendTransaction(privateKey, publicKey, toAddress, amountNOGO) {
+    // Get current balance and nonce
+    const { sha256 } = await import('@noble/hashes/sha256');
+    const { ed25519 } = await import('@noble/ed25519');
+    
+    const { address } = await this.computeAddressFromPubKey(publicKey);
+    const { balance, nonce: chainNonce } = await this.rpc.getBalance(address);
+    
+    // Estimate fee
+    let fee = await this.rpc.estimateFee('average', 350);
+    
+    // Check mempool for pending transactions
+    let nonce = chainNonce + 1;
+    try {
+      const mempool = await this.rpc.getMempool();
+      const pendingTxs = (mempool.txs || []).filter(tx => tx.fromAddr === address);
+      
+      if (pendingTxs.length > 0) {
+        const maxPendingNonce = Math.max(...pendingTxs.map(tx => tx.nonce));
+        nonce = maxPendingNonce + 1;
+        
+        // Check if replacing pending tx
+        const pendingTx = pendingTxs.find(tx => tx.nonce === nonce - 1);
+        if (pendingTx) {
+          fee = Math.floor(pendingTx.fee * 1.1) + 1;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to check mempool:', e);
+    }
+    
+    const amount = Math.floor(amountNOGO * 1e8);
+    
+    if (balance < amount + fee) {
+      throw new Error('Insufficient balance');
+    }
+    
+    // Build transaction
+    const tx = await this.buildTransfer(publicKey, toAddress, amount, fee, nonce);
+    
+    // Sign
+    const signedTx = await this.signTransaction(tx, privateKey);
+    
+    // Send
+    const result = await this.rpc.sendTransaction(signedTx);
+    
+    if (!result.accepted) {
+      throw new Error(result.message || 'Transaction rejected');
+    }
+    
+    return result;
+  }
+
+  /**
+   * Compute address from public key bytes
+   */
+  async computeAddressFromPubKey(publicKeyBytes) {
+    const { sha256 } = await import('@noble/hashes/sha256');
+    
+    const pubKeyHash = sha256(publicKeyBytes);
+    const addressData = new Uint8Array(1 + 32);
+    addressData[0] = 0x00;
+    addressData.set(pubKeyHash, 1);
+    
+    const checksumHash = sha256(addressData);
+    const checksumBytes = checksumHash.slice(0, 4);
+    
+    const fullAddress = new Uint8Array(1 + 32 + 4);
+    fullAddress.set(addressData, 0);
+    fullAddress.set(checksumBytes, 1 + 32);
+    
+    const address = 'NOGO' + Array.from(fullAddress).map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    return { address, publicKey: publicKeyBytes };
+  }
+}
+
+/**
+ * Wallet Service - High-level wallet operations
+ */
+export class WalletService {
+  constructor(rpcClient) {
+    this.rpc = rpcClient || new NogoChainRPC();
+    this.txBuilder = new TransactionBuilder(this.rpc);
+  }
+
+  /**
+   * Get wallet balance
+   */
+  async getBalance(address) {
+    return await this.rpc.getBalance(address);
+  }
+
+  /**
+   * Get wallet transaction history
+   */
+  async getTransactions(address, limit = 50, offset = 0) {
+    return await this.rpc.getAddressTransactions(address, limit, offset);
+  }
+
+  /**
+   * Send NOGO tokens
+   */
+  async send(privateKey, publicKey, toAddress, amountNOGO) {
+    return await this.txBuilder.createAndSendTransaction(
+      privateKey,
+      publicKey,
+      toAddress,
+      amountNOGO
+    );
+  }
+
+  /**
+   * Get transaction details
+   */
+  async getTransaction(txId) {
+    return await this.rpc.getTransaction(txId);
+  }
+}
+
+/**
+ * Utility functions
+ */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+function base64ToUint8Array(base64) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Export RPC client as default
+export default NogoChainRPC;
