@@ -456,5 +456,5 @@ export function initI18n() {
  * Get language name
  */
 export function getLangName(lang) {
-  return lang === 'zh' ? '中文' : 'English';
+  return lang === 'zh' ? 'Chinese' : 'English';
 }

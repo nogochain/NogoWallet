@@ -7,39 +7,23 @@
     "distDir": "../../dist",
     "devPath": "http://localhost:5174",
     "beforeDevCommand": "cd .. && npm run dev",
-    "beforeBuildCommand": "cd .. && npm run build",
-    "withGlobalTauri": true
+    "beforeBuildCommand": "cd .. && npm run build"
   },
   "tauri": {
     "bundle": {
-      "active": false,
-      "identifier": "com.nogochain.wallet"
+      "active": true,
+      "identifier": "com.nogochain.wallet",
+      "icon": ["icons/icon.ico"]
     },
     "updater": {
       "active": false
     },
     "allowlist": {
       "all": true,
-      "fs": {
+      "http": {
         "all": true,
-        "scope": ["$APPDATA/**"]
-      },
-      "dialog": {
-        "all": true,
-        "ask": true,
-        "confirm": true,
-        "message": true,
-        "open": true,
-        "save": true
-      },
-      "shell": {
-        "all": false,
-        "open": true
-      },
-      "clipboard": {
-        "all": true,
-        "writeText": true,
-        "readText": true
+        "request": true,
+        "scope": ["http://*", "https://*"]
       }
     },
     "windows": [
@@ -55,9 +39,6 @@
         "transparent": false,
         "center": true
       }
-    ],
-    "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https://api.qrserver.com; connect-src 'self' http://localhost:* https://*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;"
-    }
+    ]
   }
 }

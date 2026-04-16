@@ -111,6 +111,8 @@ function t(key) {
     'toast.import.private.success.encrypted': 'Private key imported and encrypted successfully!',
     'toast.import.private.failed': 'Failed to import private key: ',
     'toast.balance.failed': 'Failed to fetch balance',
+    'toast.send.creating': 'Creating transaction...',
+    'toast.send.balance': 'Insufficient balance',
     'toast.send.success': 'Transaction sent successfully!',
     'toast.send.failed': 'Failed to send transaction: ',
     'toast.copied': 'Copied!',
@@ -126,15 +128,42 @@ function t(key) {
   return translations[key] || key;
 }
 
+/**
+ * Base64 encoding/decoding utility functions
+ * Required for transaction signing and wallet operations
+ */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function arrayBufferToHex(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Blockchain API endpoints (multiple nodes for redundancy)
-// Priority: Local node first, then remote production nodes
+// Priority: Remote production nodes first, then local node
 // P2P peers: main.nogochain.org:9090,wallet.nogochain.org:9090,node.nogochain.org:9090
 // HTTP API:  main.nogochain.org:8080,wallet.nogochain.org:8080,node.nogochain.org:8080
 const API_ENDPOINTS = [
-  'http://localhost:8080',               // Local node (priority 1)
-  'http://main.nogochain.org:8080',      // Main production node
+  'http://main.nogochain.org:8080',      // Main production node (priority 1)
   'http://wallet.nogochain.org:8080',    // Wallet node
-  'http://node.nogochain.org:8080'       // Backup node
+  'http://node.nogochain.org:8080',      // Backup node
+  'http://localhost:8080'                // Local node (fallback)
 ];
 
 let currentApiEndpoint = 0; // Start with first endpoint
@@ -156,28 +185,51 @@ function switchApiEndpoint() {
 async function fetchWithFailover(url, options = {}) {
   let lastError;
   
-  for (let i = 0; i < API_ENDPOINTS.length; i++) {
-    const endpoint = API_ENDPOINTS[(currentApiEndpoint + i) % API_ENDPOINTS.length];
+  // If already connected to a node, try that first
+  const endpointsToTry = nodeConnected && currentNodeEndpoint 
+    ? [currentNodeEndpoint, ...API_ENDPOINTS.filter(e => e !== currentNodeEndpoint)]
+    : API_ENDPOINTS;
+  
+  console.log(`[fetchWithFailover] Trying endpoints:`, endpointsToTry);
+  
+  for (let i = 0; i < endpointsToTry.length; i++) {
+    const endpoint = endpointsToTry[i];
     try {
-      const fullUrl = url.replace(API_ENDPOINTS[0], endpoint);
+      // Build full URL using the current endpoint
+      let fullUrl;
+      if (url.startsWith('http')) {
+        fullUrl = url;
+      } else {
+        fullUrl = `${endpoint}${url.startsWith('/') ? '' : '/'}${url}`;
+      }
       
-      const response = await fetch(fullUrl, {
+      console.log(`[fetchWithFailover] Trying: ${fullUrl}`);
+      
+      const response = await httpRequest(fullUrl, {
         ...options,
-        mode: 'cors' // Enable CORS
+        timeout: options.timeout || 30
       });
       
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        throw new Error(`HTTP ${response.status}: ${response.statusText || 'Error'}`);
+      }
+      
+      // Update current endpoint on success
+      if (endpoint !== API_BASE) {
+        API_BASE = endpoint;
+        currentNodeEndpoint = endpoint;
+        nodeConnected = true;
+        console.log(`[fetchWithFailover] Updated API_BASE to: ${API_BASE}`);
       }
       
       return response;
     } catch (error) {
       lastError = error;
-      console.warn(`[API] Endpoint ${endpoint} failed:`, error.message);
+      console.warn(`[fetchWithFailover] Endpoint ${endpoint} failed:`, error?.message || error);
     }
   }
   
-  throw lastError;
+  throw lastError || new Error('All endpoints failed');
 }
 
 import { WalletManager } from '@adapter/storage.js';
@@ -202,6 +254,7 @@ let isWalletLocked = true;
 let localNonce = null; // Local nonce counter to prevent conflicts during rapid transactions
 let nodeConnected = false; // Node connection status
 let currentNodeEndpoint = API_ENDPOINTS[0]; // Current connected node
+let connectionCheckInterval = null; // Auto-reconnect timer
 
 // Expose functions to global scope immediately
 window.switchLang = switchLang;
@@ -209,6 +262,111 @@ window.t = t; // Expose translation function for HTML onclick handlers
 
 // API configuration - Use remote nodes for production
 API_BASE = API_ENDPOINTS[0];
+
+/**
+ * Unified HTTP request function for both Tauri and Web
+* Automatically detects environment and uses appropriate API
+*/
+async function httpRequest(url, options = {}) {
+  const isTauri = window.__TAURI__ !== undefined;
+  
+  console.log(`[HTTP] Requesting: ${url}, isTauri: ${isTauri}`);
+  
+  if (isTauri) {
+    // Use Tauri HTTP API for desktop app
+    try {
+      const { fetch, ResponseType } = await import('@tauri-apps/api/http');
+      
+      const method = (options.method || 'GET').toUpperCase();
+      const timeout = options.timeout || 30;
+      
+      // Build request options - headers should be an object (map), not array
+      const requestOptions = {
+        method: method,
+        headers: options.headers || {},
+        timeout: { secs: timeout, nanos: 0 },
+        responseType: ResponseType.JSON
+      };
+      
+      // Add body for POST/PUT requests
+      if (options.body && (method === 'POST' || method === 'PUT')) {
+        requestOptions.body = {
+          type: 'Text',
+          payload: options.body
+        };
+      }
+      
+      console.log(`[HTTP Tauri] Options:`, requestOptions);
+      
+      const response = await fetch(url, requestOptions);
+      
+      console.log(`[HTTP Tauri] Response: ${response.status}`);
+      
+      return {
+        ok: response.ok,
+        status: response.status,
+        json: async () => response.data,
+        text: async () => typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+      };
+    } catch (error) {
+      console.error(`[HTTP Tauri] Error:`, error);
+      throw error;
+    }
+  } else {
+    // Use browser fetch for web
+    try {
+      const controller = new AbortController();
+      const timeoutMs = ((options.timeout || 30) * 1000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      
+      const { timeout: _, ...fetchOptions } = options;
+      
+      const response = await fetch(url, {
+        ...fetchOptions,
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      console.log(`[HTTP Browser] Response: ${response.status}`);
+      return response;
+    } catch (error) {
+      console.error(`[HTTP Browser] Error:`, error);
+      throw error;
+    }
+  }
+}
+
+/**
+ * Fallback fetch function for both Tauri and Web
+ */
+async function fallbackFetch(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = (options.timeout || 10) * 1000;
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  try {
+    // Remove timeout from options since fetch doesn't support it
+    const { timeout: _, ...fetchOptions } = options;
+    
+    console.log(`[HTTP] Using fetch API for: ${url}`);
+    
+    const response = await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal
+    });
+    
+    console.log(`[HTTP] Fetch response: ${response.status}`);
+    
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
+}
 
 /**
  * Toggle node selector dropdown
@@ -293,72 +451,78 @@ async function checkNodeConnection() {
   
   if (!statusDot || !statusText) {
     console.warn('[Node Status] Status elements not found');
-    statusText.textContent = '状态栏未初始化';
+    statusText.textContent = 'Status bar not initialized';
     return;
   }
   
   // Set checking status
   statusDot.style.background = 'var(--accent-yellow)';
-  statusText.textContent = t('node.status.checking') || '检测中...';
+  statusText.textContent = t('node.status.checking') || 'Checking...';
   statusText.style.color = 'var(--text-secondary)';
   
   let lastError = null;
+
+  // Check if running in Tauri desktop app
+  const isTauri = window.__TAURI__ !== undefined;
   
-  // Try each endpoint in order
+  console.log(`[Node Status] Running in ${isTauri ? 'Tauri Desktop' : 'Web Browser'} mode`);
+  
+  // Try each endpoint in order (with retry)
   for (let i = 0; i < API_ENDPOINTS.length; i++) {
     const endpoint = API_ENDPOINTS[i];
-    
-    try {
-      console.log(`[Node Status] Trying endpoint ${i + 1}/${API_ENDPOINTS.length}: ${endpoint}`);
+
+    // Try each endpoint twice (retry on failure)
+    for (let retry = 0; retry < 2; retry++) {
+      try {
+        console.log(`[Node Status] Trying endpoint ${i + 1}/${API_ENDPOINTS.length}${retry > 0 ? ' (retry)' : ''}: ${endpoint}`);
+
+        const response = await httpRequest(`${endpoint}/health`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          timeout: 10
+        });
       
-      // Try to connect to current node with timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-      
-      const response = await fetch(`${endpoint}/health`, {
-        method: 'GET',
-        headers: { 
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        },
-        signal: controller.signal,
-        mode: 'cors' // Enable CORS
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (response.ok) {
-        const data = await response.json();
-        nodeConnected = true;
-        currentNodeEndpoint = endpoint;
-        API_BASE = endpoint; // Update global API_BASE
-        
-        // Update UI - Connected
-        statusDot.style.background = 'var(--accent-green)';
-        statusDot.style.boxShadow = '0 0 10px var(--accent-green)';
-        statusText.textContent = `✓ ${currentNodeEndpoint}`;
-        statusText.style.color = 'var(--accent-green)';
-        
-        console.log('[Node Status] ✅ Connected to:', currentNodeEndpoint);
-        console.log('[Node Status] Health data:', data);
-        
-        // Update node selector UI
-        updateNodeSelectorUI();
-        
-        return; // Success, exit function
-      } else {
-        throw new Error(`Node returned status ${response.status}`);
-      }
+        if (response.ok) {
+          const data = await response.json();
+          nodeConnected = true;
+          currentNodeEndpoint = endpoint;
+          API_BASE = endpoint; // Update global API_BASE
+          
+          // Update UI - Connected
+          statusDot.style.background = 'var(--accent-green)';
+          statusDot.style.boxShadow = '0 0 10px var(--accent-green)';
+          statusText.textContent = `✓ ${currentNodeEndpoint}`;
+          statusText.style.color = 'var(--accent-green)';
+          
+          console.log('[Node Status] ✅ Connected to:', currentNodeEndpoint);
+          console.log('[Node Status] Health data:', data);
+          
+          // Update node selector UI
+          updateNodeSelectorUI();
+          
+          return; // Success, exit function
+        } else {
+          throw new Error(`Node returned status ${response.status}`);
+        }
     } catch (error) {
       lastError = error;
-      console.warn(`[Node Status] ❌ Endpoint ${endpoint} failed:`, error.message);
+      console.warn(`[Node Status] ❌ Endpoint ${endpoint} failed (attempt ${retry + 1}/2):`, error.message);
       
-      // Continue to next endpoint
+      // Continue to retry or next endpoint
       if (error.name === 'AbortError') {
         console.warn('[Node Status] Request timeout');
       } else if (error.name === 'TypeError') {
         console.warn('[Node Status] Network error - CORS or unreachable');
       }
+      
+      // Wait 1 second before retry
+      if (retry < 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
     }
   }
   
@@ -369,8 +533,8 @@ async function checkNodeConnection() {
   statusDot.style.background = 'var(--accent-red)';
   statusDot.style.boxShadow = '0 0 10px var(--accent-red)';
   
-  const errorMsg = lastError ? lastError.message : 'Unknown error';
-  statusText.textContent = `${t('node.status.disconnected') || '节点未连接'} - ${errorMsg}`;
+  const errorMsg = lastError ? (lastError.message || lastError.toString() || 'Connection failed') : 'Connection failed';
+  statusText.textContent = `${t('node.status.disconnected') || 'Node disconnected'} - ${errorMsg}`;
   statusText.style.color = 'var(--accent-red)';
   
   console.error('[Node Status] ❌ All endpoints failed');
@@ -390,6 +554,17 @@ async function initApp() {
   
   // Check node connection
   await checkNodeConnection();
+  
+  // Start auto-reconnect timer (every 30 seconds)
+  if (connectionCheckInterval) {
+    clearInterval(connectionCheckInterval);
+  }
+  connectionCheckInterval = setInterval(async () => {
+    if (!nodeConnected) {
+      console.log('[Node Status] Auto-reconnecting...');
+      await checkNodeConnection();
+    }
+  }, 30000); // 30 seconds
   
   // Check for saved wallet
   await loadSavedWallet();
@@ -443,6 +618,8 @@ async function loadSavedWallet() {
 
 /**
  * Generate new wallet
+ * Uses same algorithm as official webwallet: mnemonic -> PBKDF2 -> SHA256 -> Ed25519
+ * This ensures compatibility with the official webwallet
  */
 async function generateWallet() {
   try {
@@ -451,30 +628,27 @@ async function generateWallet() {
     // Generate mnemonic
     const mnemonic = generateMnemonic();
     
-    // Derive seed
+    // Derive seed using PBKDF2-HMAC-SHA512 (BIP39 standard)
     const seed = await mnemonicToSeed(mnemonic);
+    console.log('[DEBUG generateWallet] Seed (hex):', Array.from(seed).map(b => b.toString(16).padStart(2, '0')).join(''));
     
-    // Derive key using BIP44 path - NogoChain uses coinType 0 (not 60 which is Ethereum)
-    // Path: m/44'/0'/0'/0/0  (purpose/coinType/account/change/index)
-    const path = "m/44'/0'/0'/0/0";
-    const derivedKey = await derivePath(seed, path);
+    // Hash seed with SHA-256 to get private key (matches official webwallet)
+    const hashBuffer = await crypto.subtle.digest('SHA-256', seed);
+    const privateKeyBytes = new Uint8Array(hashBuffer);
+    console.log('[DEBUG generateWallet] PrivateKey (hex):', Array.from(privateKeyBytes).map(b => b.toString(16).padStart(2, '0')).join(''));
     
-    // Generate key pair
-    const keyPair = await generateKeyPair(derivedKey);
-    
-    console.log('[generateWallet] Key pair:', {
-      privateKeyType: keyPair.privateKey?.constructor?.name,
-      privateKeyLength: keyPair.privateKey?.byteLength,
-      publicKeyType: keyPair.publicKey?.constructor?.name,
-      publicKeyLength: keyPair.publicKey?.byteLength
-    });
+    // Generate Ed25519 public key
+    const ed25519 = await import('@noble/ed25519');
+    const publicKeyBytes = await ed25519.getPublicKey(privateKeyBytes);
+    console.log('[DEBUG generateWallet] PublicKey (hex):', Array.from(publicKeyBytes).map(b => b.toString(16).padStart(2, '0')).join(''));
     
     // Generate address
-    const address = generateAddress(keyPair.publicKey);
+    const address = generateAddress(publicKeyBytes);
+    console.log('[DEBUG generateWallet] Address:', address);
     
     // Convert to Base64
-    const privateKeyBase64 = arrayBufferToBase64(keyPair.privateKey);
-    const publicKeyBase64 = arrayBufferToBase64(keyPair.publicKey);
+    const privateKeyBase64 = arrayBufferToBase64(privateKeyBytes.buffer);
+    const publicKeyBase64 = arrayBufferToBase64(publicKeyBytes.buffer);
     
     console.log('[generateWallet] Generated keys:', {
       address,
@@ -523,49 +697,24 @@ async function generateWallet() {
 }
 
 /**
- * Save wallet with password encryption
+ * Save wallet without password encryption
  */
 async function saveWalletWithPassword() {
-  const password1 = document.getElementById('walletPassword1').value;
-  const password2 = document.getElementById('walletPassword2').value;
-  
-  if (!password1 || !password2) {
-    document.getElementById('passwordMatchError').textContent = t('create.password.input');
-    document.getElementById('passwordMatchError').style.display = 'block';
-    return;
-  }
-  
-  if (password1 !== password2) {
-    document.getElementById('passwordMatchError').textContent = t('create.password.error');
-    document.getElementById('passwordMatchError').style.display = 'block';
-    return;
-  }
-  
-  if (password1.length < 8) {
-    document.getElementById('passwordMatchError').textContent = t('create.password.minlength');
-    document.getElementById('passwordMatchError').style.display = 'block';
-    return;
-  }
-  
   try {
-    const { encryptWalletData } = await import('@adapter/storage.js');
-    
-    // Encrypt wallet data
-    const encrypted = await encryptWalletData(currentWallet, password1);
-    localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
-    currentWallet = encrypted;
+    // Save wallet without encryption
+    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
     isWalletLocked = false;
     
     // Clear backup if exists
     localStorage.removeItem('nogoWallet_backup');
     
-    showToast(t('toast.encrypt.success'));
+    showToast(t('toast.create.success'));
     showTab('walletDashboardTab');
     loadWalletInfo();
     
   } catch (e) {
-    console.error('Failed to encrypt wallet:', e);
-    showToast(t('toast.encrypt.failed'));
+    console.error('Failed to save wallet:', e);
+    showToast(t('toast.create.failed'));
   }
 }
 
@@ -627,47 +776,13 @@ async function importFromMnemonic(mnemonic) {
     imported: true
   };
   
-  // Check password
-  const password1 = document.getElementById('importPassword1').value;
-  const password2 = document.getElementById('importPassword2').value;
+  // Save wallet without encryption
+  localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
   
-  if (password1 || password2) {
-    if (!password1 || !password2) {
-      document.getElementById('importPasswordError').textContent = t('create.password.input');
-      document.getElementById('importPasswordError').style.display = 'block';
-      return;
-    }
-    
-    if (password1 !== password2) {
-      document.getElementById('importPasswordError').textContent = t('create.password.error');
-      document.getElementById('importPasswordError').style.display = 'block';
-      return;
-    }
-    
-    if (password1.length < 8) {
-      document.getElementById('importPasswordError').textContent = t('create.password.minlength');
-      document.getElementById('importPasswordError').style.display = 'block';
-      return;
-    }
-    
-    // Encrypt and save
-    const { encryptWalletData } = await import('@adapter/storage.js');
-    const encrypted = await encryptWalletData(currentWallet, password1);
-    localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
-    currentWallet = encrypted;
-    
-    // Clear backup if exists
-    localStorage.removeItem('nogoWallet_backup');
-    
-    showToast(t('toast.import.success.encrypted'));
-  } else {
-    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
-    
-    // Clear backup if exists
-    localStorage.removeItem('nogoWallet_backup');
-    
-    showToast(t('toast.import.success'));
-  }
+  // Clear backup if exists
+  localStorage.removeItem('nogoWallet_backup');
+  
+  showToast(t('toast.import.success'));
   
   showTab('walletDashboardTab');
   loadWalletInfo();
@@ -687,7 +802,7 @@ async function importFromPrivateKey(privateKeyBase64) {
     
     // Generate public key
     const ed25519 = await import('@noble/ed25519');
-    const publicKeyBytes = await ed25519.ed25519.getPublicKey(privateKeyBytes);
+    const publicKeyBytes = await ed25519.getPublicKey(privateKeyBytes);
     
     // Generate address
     const address = generateAddress(publicKeyBytes);
@@ -700,47 +815,13 @@ async function importFromPrivateKey(privateKeyBase64) {
       imported: true
     };
     
-    // Check password
-    const password1 = document.getElementById('importPassword1').value;
-    const password2 = document.getElementById('importPassword2').value;
+    // Save wallet without encryption
+    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
     
-    if (password1 || password2) {
-      if (!password1 || !password2) {
-        document.getElementById('importPasswordError').textContent = '请填写两个密码字段或都留空';
-        document.getElementById('importPasswordError').style.display = 'block';
-        return;
-      }
-      
-      if (password1 !== password2) {
-        document.getElementById('importPasswordError').textContent = '密码不匹配！';
-        document.getElementById('importPasswordError').style.display = 'block';
-        return;
-      }
-      
-      if (password1.length < 8) {
-        document.getElementById('importPasswordError').textContent = '密码必须至少 8 个字符';
-        document.getElementById('importPasswordError').style.display = 'block';
-        return;
-      }
-      
-      // Encrypt and save
-      const { encryptWalletData } = await import('@adapter/storage.js');
-      const encrypted = await encryptWalletData(currentWallet, password1);
-      localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
-      currentWallet = encrypted;
-      
-      // Clear backup if exists
-      localStorage.removeItem('nogoWallet_backup');
-      
-      showToast(t('toast.import.private.success.encrypted'));
-    } else {
-      localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
-      
-      // Clear backup if exists
-      localStorage.removeItem('nogoWallet_backup');
-      
-      showToast(t('toast.import.private.success'));
-    }
+    // Clear backup if exists
+    localStorage.removeItem('nogoWallet_backup');
+    
+    showToast(t('toast.import.private.success'));
     
     showTab('walletDashboardTab');
     loadWalletInfo();
@@ -820,40 +901,9 @@ async function reimportFromMnemonic(mnemonic) {
     imported: true
   };
   
-  // Check password
-  const password1 = document.getElementById('reimportPassword1').value;
-  const password2 = document.getElementById('reimportPassword2').value;
-  
-  if (password1 || password2) {
-    if (!password1 || !password2) {
-      document.getElementById('reimportPasswordError').textContent = t('create.password.input');
-      document.getElementById('reimportPasswordError').style.display = 'block';
-      return;
-    }
-    
-    if (password1 !== password2) {
-      document.getElementById('reimportPasswordError').textContent = t('create.password.error');
-      document.getElementById('reimportPasswordError').style.display = 'block';
-      return;
-    }
-    
-    if (password1.length < 8) {
-      document.getElementById('reimportPasswordError').textContent = t('create.password.minlength');
-      document.getElementById('reimportPasswordError').style.display = 'block';
-      return;
-    }
-    
-    // Encrypt and save
-    const { encryptWalletData } = await import('@adapter/storage.js');
-    const encrypted = await encryptWalletData(currentWallet, password1);
-    localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
-    currentWallet = encrypted;
-    
-    showToast(t('toast.import.success.encrypted'));
-  } else {
-    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
-    showToast(t('toast.import.success'));
-  }
+  // Save wallet without encryption
+  localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+  showToast(t('toast.import.success'));
   
   // Reset nonce counter
   localNonce = null;
@@ -883,7 +933,7 @@ async function reimportFromPrivateKey(privateKeyBase64) {
     
     // Generate public key
     const ed25519 = await import('@noble/ed25519');
-    const publicKeyBytes = await ed25519.ed25519.getPublicKey(privateKeyBytes);
+    const publicKeyBytes = await ed25519.getPublicKey(privateKeyBytes);
     
     // Generate address
     const address = generateAddress(publicKeyBytes);
@@ -896,40 +946,9 @@ async function reimportFromPrivateKey(privateKeyBase64) {
       imported: true
     };
     
-    // Check password
-    const password1 = document.getElementById('reimportPassword1').value;
-    const password2 = document.getElementById('reimportPassword2').value;
-    
-    if (password1 || password2) {
-      if (!password1 || !password2) {
-        document.getElementById('reimportPasswordError').textContent = t('create.password.input');
-        document.getElementById('reimportPasswordError').style.display = 'block';
-        return;
-      }
-      
-      if (password1 !== password2) {
-        document.getElementById('reimportPasswordError').textContent = t('create.password.error');
-        document.getElementById('reimportPasswordError').style.display = 'block';
-        return;
-      }
-      
-      if (password1.length < 8) {
-        document.getElementById('reimportPasswordError').textContent = t('create.password.minlength');
-        document.getElementById('reimportPasswordError').style.display = 'block';
-        return;
-      }
-      
-      // Encrypt and save
-      const { encryptWalletData } = await import('@adapter/storage.js');
-      const encrypted = await encryptWalletData(currentWallet, password1);
-      localStorage.setItem('nogoWallet', JSON.stringify(encrypted));
-      currentWallet = encrypted;
-      
-      showToast(t('toast.import.private.success.encrypted'));
-    } else {
-      localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
-      showToast(t('toast.import.private.success'));
-    }
+    // Save wallet without encryption
+    localStorage.setItem('nogoWallet', JSON.stringify(currentWallet));
+    showToast(t('toast.import.private.success'));
     
     // Reset nonce counter
     localNonce = null;
@@ -1086,9 +1105,13 @@ async function loadTransactions() {
       const direction = isIncoming ? 'IN' : 'OUT';
       const amountClass = isIncoming ? 'text-green' : 'text-red';
       
-      let timestamp = 'N/A';
+      let timestamp = 'Pending';
       if (tx.blockTime) {
         timestamp = new Date(tx.blockTime * 1000).toLocaleString();
+      } else if (tx.timestamp) {
+        timestamp = new Date(tx.timestamp * 1000).toLocaleString();
+      } else if (tx.time) {
+        timestamp = new Date(tx.time * 1000).toLocaleString();
       }
       
       const txHash = tx.txId || tx.hash || 'N/A';
@@ -1102,27 +1125,27 @@ async function loadTransactions() {
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
             <div>
-              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">类型</div>
+              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Type</div>
               <div style="color: var(--text-primary); font-size: 13px;">${isCoinbase ? t('wallet.transactions.coinbase') : t('wallet.transactions.transfer')} ${isIncoming ? '⬇️' : '⬆️'}</div>
             </div>
             <div>
-              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">状态</div>
+              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Status</div>
               <div style="color: var(--text-primary); font-size: 13px;">${statusDisplay}</div>
             </div>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
             <div>
-              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">金额</div>
+              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Amount</div>
               <div style="color: var(${amountClass}); font-family: 'Courier New', monospace; font-size: 16px; font-weight: bold;">${isIncoming ? '+' : '-'}${amount.toFixed(8)} NOGO</div>
             </div>
             <div>
-              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">手续费</div>
+              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Fee</div>
               <div style="color: var(--text-secondary); font-family: 'Courier New', monospace; font-size: 13px;">${fee.toFixed(8)} NOGO</div>
             </div>
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
             <div>
-              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">时间</div>
+              <div style="color: var(--text-secondary); font-size: 11px; text-transform: uppercase; margin-bottom: 4px;">Time</div>
               <div style="color: var(--text-primary); font-family: 'Courier New', monospace; font-size: 13px;">${timestamp}</div>
             </div>
           </div>
@@ -1139,31 +1162,146 @@ async function loadTransactions() {
 }
 
 /**
+ * Show password prompt for transaction signing
+ */
+function showPasswordPrompt(message) {
+  return new Promise((resolve, reject) => {
+    console.log('showPasswordPrompt called with message:', message);
+    
+    // Check if in Tauri environment
+  const isTauri = window.__TAURI__ !== undefined;
+  
+  if (isTauri) {
+    console.log('Using Tauri dialog API for password input');
+    // Use Tauri dialog API
+    import('@tauri-apps/api/dialog').then(({ input }) => {
+      // Use input dialog to get password
+      input({
+        title: 'Transaction Authorization',
+        message: message,
+        value: '',
+        password: true
+      }).then((password) => {
+        console.log('Tauri input dialog result:', password === null ? 'Cancelled' : 'Entered');
+        
+        if (password === null) {
+          console.log('User cancelled password input');
+          reject(new Error('Transaction cancelled'));
+        } else if (!password) {
+          // If user entered empty password, prompt user
+          import('@tauri-apps/api/dialog').then(({ confirm }) => {
+            confirm('Password cannot be empty. Do you want to try again?', {
+              title: 'Error',
+              okLabel: 'Yes',
+              cancelLabel: 'No'
+            }).then((retry) => {
+              if (retry) {
+                console.log('User wants to retry password input');
+                showPasswordPrompt(message).then(resolve).catch(reject);
+              } else {
+                console.log('User cancelled password input after empty password');
+                reject(new Error('Transaction cancelled'));
+              }
+            });
+          });
+        } else {
+          console.log('Password entered successfully, resolving promise');
+          resolve(password);
+        }
+      }).catch((error) => {
+        console.error('Tauri dialog error:', error);
+        // Fallback to using prompt
+        usePrompt();
+      });
+    }).catch((error) => {
+      console.error('Failed to import Tauri dialog:', error);
+      // Fallback to using prompt
+      usePrompt();
+    });
+  } else {
+    // Use prompt in non-Tauri environment
+    usePrompt();
+  }
+  
+  // Prompt fallback function
+  function usePrompt() {
+    console.log('Using prompt for password input');
+    const password = prompt(message + '\n\nNote: Password will be displayed as plain text', '');
+    console.log('Prompt result:', password === null ? 'Cancelled' : 'Entered');
+    
+    if (password === null) {
+      console.log('User cancelled password input');
+      reject(new Error('Transaction cancelled'));
+    } else if (!password) {
+      // If user entered empty password, prompt user
+      const retry = confirm('Password cannot be empty. Do you want to try again?');
+      if (retry) {
+        // Recursive call to let user re-enter
+        console.log('User wants to retry password input');
+        showPasswordPrompt(message).then(resolve).catch(reject);
+      } else {
+        console.log('User cancelled password input after empty password');
+        reject(new Error('Transaction cancelled'));
+      }
+    } else {
+      console.log('Password entered successfully, resolving promise');
+      resolve(password);
+    }
+  }
+  });
+}
+
+/**
  * Send transaction
  */
 async function sendTransaction() {
-  const toAddress = document.getElementById('sendAddress').value.trim();
+  console.log('[Send Transaction] Function called');
+  const toAddress = document.getElementById('sendToAddress').value.trim();
   const amountNOGO = parseFloat(document.getElementById('sendAmount').value);
+  console.log('[Send Transaction] Input values - toAddress:', toAddress, 'amountNOGO:', amountNOGO);
   
   if (!toAddress || !toAddress.startsWith('NOGO')) {
-    showToast(t('toast.send.address.invalid'));
+    showToast('Invalid address. Address must start with NOGO');
     return;
   }
   if (!amountNOGO || amountNOGO <= 0) {
-    showToast(t('toast.send.amount.invalid'));
+    showToast('Invalid amount. Amount must be greater than 0');
     return;
   }
   if (!currentWallet) {
-    showToast(t('toast.send.wallet.notloaded'));
+    showToast('Wallet not loaded');
     return;
   }
   
   try {
     showToast(t('toast.send.creating'));
     
-    // Get balance
-    const balanceResp = await fetch(`${API_BASE}/balance/${currentWallet.address}`);
-    const balanceData = await balanceResp.json();
+    console.log('[Send Transaction] Current wallet:', {
+      address: currentWallet.address,
+      encrypted: currentWallet.encrypted,
+      hasPrivateKey: !!currentWallet.privateKey,
+      hasPublicKey: !!currentWallet.publicKey
+    });
+    
+    // All wallets are unencrypted now
+    if (!currentWallet.privateKey) {
+      // Unencrypted wallet but no private key
+      showToast('Wallet not loaded properly');
+      return;
+    }
+    console.log('[Send Transaction] Wallet is not encrypted, using existing private key');
+    let decryptedWallet = currentWallet;
+    
+    // Get balance using fetchWithFailover for reliability
+    let balanceData;
+    try {
+      const balanceResp = await fetchWithFailover(`/balance/${currentWallet.address}`);
+      balanceData = await balanceResp.json();
+    } catch (e) {
+      console.error('Failed to get balance:', e);
+      showToast('Failed to connect to network. Please check your connection.');
+      return;
+    }
     const balance = balanceData.balance || 0;
     
     // Use and increment local nonce
@@ -1177,7 +1315,7 @@ async function sendTransaction() {
     
     // Estimate fee
     try {
-      const feeResp = await fetch(`${API_BASE}/tx/estimate_fee?speed=average&size=350`);
+      const feeResp = await fetchWithFailover(`/tx/estimate_fee?speed=average&size=350`);
       const feeData = await feeResp.json();
       fee = feeData.estimatedFee || 45000;
     } catch (e) {
@@ -1195,7 +1333,7 @@ async function sendTransaction() {
     const tx = {
       type: 'transfer',
       chainId: 1,
-      fromPubKey: currentWallet.publicKey,
+      fromPubKey: decryptedWallet.publicKey,
       toAddress: toAddress,
       amount: amount,
       fee: fee,
@@ -1205,7 +1343,7 @@ async function sendTransaction() {
     
     // Compute from address
     const { sha256 } = await import('@noble/hashes/sha256');
-    const pubKeyBytes = base64ToUint8Array(currentWallet.publicKey);
+    const pubKeyBytes = base64ToUint8Array(decryptedWallet.publicKey);
     const pubKeyHash = sha256(pubKeyBytes);
     const addressData = new Uint8Array(1 + 32);
     addressData[0] = 0x00;
@@ -1235,29 +1373,47 @@ async function sendTransaction() {
     
     // Sign
     const ed25519 = await import('@noble/ed25519');
-    const privateKeyBytes = base64ToUint8Array(currentWallet.privateKey);
-    const signature = await ed25519.ed25519.sign(msgHash, privateKeyBytes);
+    const privateKeyBytes = base64ToUint8Array(decryptedWallet.privateKey);
+    const signature = await ed25519.sign(msgHash, privateKeyBytes);
     
     // Add signature
     tx.signature = arrayBufferToBase64(signature.buffer);
     
+    // Debug: log transaction before sending
+    console.log('[Send Transaction] Sending tx:', JSON.stringify(tx, null, 2));
+    console.log('[Send Transaction] API_BASE:', API_BASE);
+    
     // Send
-    const submitResp = await fetchWithFailover(`${API_BASE}/tx`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tx)
-    });
+    let submitResp;
+    try {
+      submitResp = await fetchWithFailover(`/tx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tx)
+      });
+    } catch (e) {
+      console.error('Network error:', e);
+      showToast('Network error: ' + (e?.message || 'Failed to connect'));
+      return;
+    }
     
     const result = await submitResp.json();
+    console.log('[Send Transaction] Response:', result);
+    
     const accepted = result.accepted || result.Accepted;
     const txid = result.txId || result.TxID || result.txid;
     const message = result.message || result.Message || result.error;
     
     if (accepted) {
-      showToast(t('toast.send.success') + txid.substring(0, 16) + '...' + txid.substring(txid.length - 8));
+      // Show success toast with full transaction hash
+      const shortTxid = txid ? (txid.length > 24 ? txid.substring(0, 12) + '...' + txid.substring(txid.length - 12) : txid) : 'Unknown';
+      showToast(t('toast.send.success') + ' ' + shortTxid);
+      
+      // Also log full txid to console
+      console.log('[Send Transaction] Success! Full TXID:', txid);
       
       // Clear form
-      document.getElementById('sendAddress').value = '';
+      document.getElementById('sendToAddress').value = '';
       document.getElementById('sendAmount').value = '';
       
       // Update nonce display immediately
@@ -1273,7 +1429,10 @@ async function sendTransaction() {
     
   } catch (e) {
     console.error('Send failed:', e);
-    showToast(t('toast.send.failed') + e.message);
+    console.error('Error type:', typeof e);
+    console.error('Error keys:', Object.keys(e || {}));
+    const errorMessage = e?.message || e?.error || e?.toString() || 'Unknown error occurred';
+    showToast(t('toast.send.failed') + errorMessage);
   }
 }
 
@@ -1601,27 +1760,6 @@ function updatePageLanguage() {
   console.log('[i18n] Language updated to:', getCurrentLang());
 }
 
-/**
- * Utility functions
- */
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return window.btoa(binary);
-}
-
-function base64ToUint8Array(base64) {
-  const binary = window.atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 // Initialize app on load
 // Use 'load' event instead of 'DOMContentLoaded' for better Tauri compatibility
 window.addEventListener('load', () => {
@@ -1647,6 +1785,7 @@ window.copyToClipboard = copyToClipboard;
 window.switchCreateTab = switchCreateTab;
 window.switchImportTab = switchImportTab;
 window.switchWalletTab = switchWalletTab;
+window.sendTransaction = sendTransaction;
 window.showSection = function(section) {
   console.log('Section:', section);
 };

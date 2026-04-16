@@ -142,26 +142,12 @@
               </div>
             </div>
             
-            <p style="color: var(--text-secondary); font-size: 14px; margin: 20px 0 10px; text-align: center;">💡 Tip: You can set a password to encrypt wallet storage (optional)</p>
           </div>
           
-          <!-- Password Input -->
-          <div id="passwordSection" style="display: none;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0;">
-              <div>
-                <label class="form-label" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary); font-size: 14px;">Set Password</label>
-                <input type="password" id="walletPassword1" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s;" placeholder="At least 8 characters">
-              </div>
-              <div>
-                <label class="form-label" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary); font-size: 14px;">Confirm Password</label>
-                <input type="password" id="walletPassword2" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s;" placeholder="Enter password again">
-              </div>
-            </div>
-            
-            <p id="passwordMatchError" style="color: var(--accent-red); font-size: 14px; margin: 10px 0; display: none;"></p>
-            
+          <!-- Save Wallet Button -->
+          <div style="margin-top: 20px;">
             <button class="btn btn-success" id="saveWalletBtn" style="width: 100%; padding: 16px; margin: 20px 0 10px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; background: linear-gradient(135deg, var(--accent-green), #059669); color: white; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4); transition: all 0.3s;">
-              🔒 Encrypt & Save Wallet
+              💾 Save Wallet
             </button>
           </div>
         </div>
@@ -189,18 +175,7 @@
             <input type="text" id="importPrivateKey" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s; font-family: 'Consolas', monospace;" placeholder="Enter Base64 encoded private key">
           </div>
           
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0;">
-            <div>
-              <label class="form-label" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary); font-size: 14px;">Set Password</label>
-              <input type="password" id="importPassword1" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s;" placeholder="At least 8 characters">
-            </div>
-            <div>
-              <label class="form-label" style="display: block; margin-bottom: 8px; font-weight: 600; color: var(--text-primary); font-size: 14px;">Confirm Password</label>
-              <input type="password" id="importPassword2" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s;" placeholder="Enter password again">
-            </div>
-          </div>
-          
-          <p id="importPasswordError" style="color: var(--accent-red); font-size: 14px; margin: 10px 0; display: none;"></p>
+
           
           <button class="btn btn-primary" id="importSubmitBtn" style="width: 100%; padding: 16px; margin: 20px 0 10px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; background: var(--accent-gradient); color: white; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); transition: all 0.3s;">
             📥 Import Wallet
@@ -247,7 +222,7 @@
               <input type="text" id="sendMemo" class="form-input" style="width: 100%; padding: 14px 16px; background: var(--bg-tertiary); border: 2px solid var(--border-color); border-radius: 10px; color: var(--text-primary); font-size: 14px; transition: all 0.2s;" placeholder="Transaction memo">
             </div>
             
-            <button class="btn btn-primary" id="sendTransactionBtn" style="width: 100%; padding: 16px; margin: 20px 0 10px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; background: var(--accent-gradient); color: white; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); transition: all 0.3s;">
+            <button class="btn btn-primary" id="sendTransactionBtn" onclick="sendTransaction()" style="width: 100%; padding: 16px; margin: 20px 0 10px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; background: var(--accent-gradient); color: white; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); transition: all 0.3s;">
               🚀 Send Transaction
             </button>
           </div>

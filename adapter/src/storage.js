@@ -80,36 +80,73 @@ export async function encryptWalletData(walletData, password) {
  */
 export async function decryptWalletData(encryptedData, password) {
   try {
-    const enc = new TextEncoder();
-    const dec = new TextDecoder();
+    // Check if you are in the Tauri environment
+    const isTauri = window.__TAURI__ !== undefined;
     
-    if (!encryptedData.encrypted || !encryptedData.salt || !encryptedData.iv) {
-      throw new Error('Invalid encrypted wallet data structure');
+    if (isTauri) {
+      console.log('Using Tauri backend for decryption');
+      // Convert the field names to ensure they match the `EncryptedWallet` struct in the Rust backend
+      const tauriEncryptedData = {
+        encrypted: encryptedData.encrypted,
+        salt: encryptedData.salt,
+        iv: encryptedData.iv,
+        version: encryptedData.version || 1,
+        address: encryptedData.address,
+        public_key: encryptedData.publicKey 
+      };
+      console.log('Converted encrypted data for Tauri:', tauriEncryptedData);
+      
+      // Decrypting using the Tauri backend
+      const { invoke } = await import('@tauri-apps/api');
+      const decrypted = await invoke('decrypt_wallet_data', {
+        encryptedData: tauriEncryptedData,
+        password
+      });
+      console.log('Tauri decryption result:', decrypted);
+      
+      // Convert back to camelCase
+      return {
+        address: decrypted.address,
+        publicKey: decrypted.publicKey,
+        privateKey: decrypted.privateKey,
+        mnemonic: decrypted.mnemonic,
+        encrypted: decrypted.encrypted
+      };
+    } else {
+      console.log('Using Web Crypto API for decryption');
+      // Decrypting using the Web Crypto API
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      
+      if (!encryptedData.encrypted || !encryptedData.salt || !encryptedData.iv) {
+        throw new Error('Invalid encrypted wallet data structure');
+      }
+      
+      const salt = base64ToUint8Array(encryptedData.salt);
+      const iv = base64ToUint8Array(encryptedData.iv);
+      const encrypted = base64ToUint8Array(encryptedData.encrypted);
+      
+      const key = await deriveKey(password, salt);
+      
+      const decrypted = await cryptoApi.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv },
+        key,
+        encrypted
+      );
+      
+      const sensitiveData = JSON.parse(dec.decode(decrypted));
+      
+      return {
+        address: encryptedData.address,
+        publicKey: encryptedData.publicKey,
+        privateKey: sensitiveData.privateKey,
+        mnemonic: sensitiveData.mnemonic,
+        encrypted: true
+      };
     }
-    
-    const salt = base64ToUint8Array(encryptedData.salt);
-    const iv = base64ToUint8Array(encryptedData.iv);
-    const encrypted = base64ToUint8Array(encryptedData.encrypted);
-    
-    const key = await deriveKey(password, salt);
-    
-    const decrypted = await cryptoApi.subtle.decrypt(
-      { name: 'AES-GCM', iv: iv },
-      key,
-      encrypted
-    );
-    
-    const sensitiveData = JSON.parse(dec.decode(decrypted));
-    
-    return {
-      address: encryptedData.address,
-      publicKey: base64ToUint8Array(encryptedData.publicKey),
-      privateKey: sensitiveData.privateKey,
-      mnemonic: sensitiveData.mnemonic,
-      encrypted: true
-    };
   } catch (e) {
-    if (e.name === 'InvalidAccessError' || e.name === 'OperationFailed') {
+    console.error('Decryption error:', e);
+    if (e.name === 'InvalidAccessError' || e.name === 'OperationFailed' || e.message.includes('Wrong password')) {
       throw new Error('Wrong password or corrupted data');
     }
     throw new Error(`Decryption failed: ${e.message}`);
